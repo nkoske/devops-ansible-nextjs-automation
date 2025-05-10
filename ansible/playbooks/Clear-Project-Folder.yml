@@ -1,0 +1,5 @@
+- name: Projektverzeichnis löschen
+  shell: |
+    rm -rf "{{ PROJECT_ROOT_DIR }}"
+    mkdir -p "{{ PROJECT_ROOT_DIR }}"
+   

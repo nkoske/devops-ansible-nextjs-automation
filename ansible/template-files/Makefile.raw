@@ -1,0 +1,236 @@
+.PHONY: prepare build run stop restart status rebuild clean prepare-deployment lint generate-dockerfile
+
+PROJECT_NAME := $(notdir $(shell pwd))
+REQUIRED__HOST_ENTRIES = 127.0.0.1 dighost-web.localhost
+HOSTS_FILE_DIR := /etc/hosts
+
+# Prepare project and install dependencies
+
+prepare-ansible:
+	@$(MAKE) -s prepare-hosts
+	@$(MAKE) -s prepare-env
+	@$(MAKE) -s prepare-yarn
+
+
+prepare:
+	@echo "Preparing project..."
+	docker network inspect Developer_Network >/dev/null 2>&1 || docker network create Developer_Network
+	@$(MAKE) -s prepare-hosts
+	@$(MAKE) -s prepare-env
+	@$(MAKE) -s prepare-yarn
+	@$(MAKE) -s build
+
+
+prepare-yarn:
+	@echo "Preparing yarn..."
+	yarn install
+
+prepare-env:
+	@echo "Preparing environment..."
+	cp ./env.example ./.env
+
+prepare-hosts:
+	@echo "Preparing hosts..."
+	@for entry in "$(REQUIRED__HOST_ENTRIES)"; do \
+		if ! grep -q "$$entry" $(HOSTS_FILE_DIR); then \
+			echo "Adding '$$entry' to $(HOSTS_FILE_DIR)..."; \
+			echo "$$entry" | sudo tee -a $(HOSTS_FILE_DIR) > /dev/null; \
+		fi; \
+	done
+
+build:
+	@echo "Checking Docker Compose availability..."
+	@if docker compose version >/dev/null 2>&1; then \
+		echo "'docker compose' is available."; \
+		docker compose build; \
+		$(MAKE) -s run; \
+	elif docker-compose version >/dev/null 2>&1; then \
+		echo "'docker-compose' is available."; \
+		docker-compose build; \
+		$(MAKE) -s run; \
+	else \
+		echo "Neither 'docker compose' nor 'docker-compose' is available. Please install Docker or Docker Compose."; \
+		exit 1; \
+	fi
+
+
+
+
+# the place to use docker-compose build --no-cache
+force-rebuild:
+	@echo "Rebuilding Containers..."
+	@if docker compose version >/dev/null 2>&1; then \
+		docker compose build --no-cache; \
+		$(MAKE) -s run; \
+	elif docker-compose version >/dev/null 2>&1; then \
+		docker-compose build --no-cache; \
+		$(MAKE) -s run; \
+	else \
+		echo "Neither 'docker compose' nor 'docker-compose' is available. Please install Docker or Docker Compose."; \
+		exit 1; \
+	fi
+
+
+# Run the application
+run:
+	@echo "Starting application..."
+	@echo "Rebuilding Containers..."
+	@if docker compose version >/dev/null 2>&1; then \
+		docker compose -f docker-compose.yml up -d --force-recreate; \
+		$(MAKE) -s status; \
+	elif docker-compose version >/dev/null 2>&1; then \
+		docker-compose -f docker-compose.yml up -d --force-recreate; \
+		$(MAKE) -s status; \
+	else \
+		echo "Neither 'docker compose' nor 'docker-compose' is available. Please install Docker or Docker Compose."; \
+		exit 1; \
+	fi
+
+restart:
+	@$(MAKE) -s stop
+	@$(MAKE) -s run
+
+# Stop the application
+stop:
+	@echo "Stopping application..."
+	docker compose down
+
+status:
+	@echo "Docker compose status..."
+	@if docker compose version >/dev/null 2>&1; then \
+		docker compose ps; \
+	elif docker-compose version >/dev/null 2>&1; then \
+		docker-compose ps; \
+	else \
+		echo "Neither 'docker compose' nor 'docker-compose' is available. Please install Docker or Docker Compose."; \
+		exit 1; \
+	fi
+
+clean:
+	@echo "cleaning up..."
+	@if docker compose version >/dev/null 2>&1; then \
+		docker compose down --volumes --remove-orphans; \
+	elif docker-compose version >/dev/null 2>&1; then \
+		docker-compose down --volumes --remove-orphans; \
+	else \
+		echo "Neither 'docker compose' nor 'docker-compose' is available. Please install Docker or Docker Compose."; \
+		exit 1; \
+	fi
+
+
+	@echo "removing network..."
+	- docker network rm Developer_Network
+	@echo "removing hosts..."
+	@for entry in "$(REQUIRED__HOST_ENTRIES)"; do \
+		if grep -q "$$entry" $(HOSTS_FILE_DIR); then \
+			echo "Removing '$$entry' from $(HOSTS_FILE_DIR)..."; \
+			sudo sed -i "/$$entry/d" $(HOSTS_FILE_DIR); \
+		fi; \
+	done
+	@echo "cleaning up done"
+	@echo "done"
+
+
+
+
+prepare-deployment:
+	@$(MAKE) -s generate-autodeployment-workflow
+	@$(MAKE) -s generate-docker-compose-build
+	@$(MAKE) -s generate-dockerfile
+
+generate-autodeployment-workflow:
+	 @echo "Generating workflow file with environment variables..."
+	 @keys=$$(grep -o '^[A-Z0-9_]\+' env.example); \
+	 cp .github/workflow_templates/automated_deploy.yml .github/workflows/automated_deploy.yml; \
+	 awk -v keys="$$keys" ' \
+	 BEGIN { \
+	  split(keys, keyArray, " "); \
+	 } \
+	 { \
+	  if ($$0 ~ /### ENVIRONMENT VARIABLES Generation ###/) { \
+	   for (i in keyArray) { \
+		key = keyArray[i]; \
+		if (key ~ /API_KEY|_PASSWORD/) { \
+		 print "            export " key "=$${{ secrets." key " }}"; \
+		} else { \
+		 print "            export " key "=$${{ vars." key " }}"; \
+		} \
+	   } \
+	  } else { \
+	   print $$0; \
+	  } \
+	 } \
+	 ' .github/workflow_templates/automated_deploy.yml > .github/workflows/automated_deploy.yml.tmp; \
+	 mv .github/workflows/automated_deploy.yml.tmp .github/workflows/automated_deploy.yml; \
+	 echo "Workflow file generated successfully."
+
+generate-docker-compose-build:
+	@echo "Generating docker-compose.build.yml from template..."
+	@cp docker-compose.build.template.yml docker-compose.build.yml
+	@sed -i "s/REPONAME/$(PROJECT_NAME)/" docker-compose.build.yml
+	
+	# Create args section from env variables
+	@echo "      args:" >> docker-compose.build.yml.tmp
+	@grep '^NEXT_PUBLIC_' env.example | sed 's/=.*//' | while read var; do \
+		echo "        - \"$$var=\$${$$var}\"" >> docker-compose.build.yml.tmp; \
+	done
+	
+	# Create environment section
+	@echo "    environment:" >> docker-compose.build.yml.tmp2
+	@grep '^NEXT_PUBLIC_' env.example | sed 's/=.*//' | while read var; do \
+		echo "      - \"$$var=\$${$$var}\"" >> docker-compose.build.yml.tmp2; \
+	done
+	
+	# Combine the files
+	@sed -i '/build:/r docker-compose.build.yml.tmp' docker-compose.build.yml
+	@cat docker-compose.build.yml.tmp2 >> docker-compose.build.yml
+	
+	# Cleanup temporary files
+	@rm docker-compose.build.yml.tmp docker-compose.build.yml.tmp2
+	
+	@echo "docker-compose.build.yml generated successfully."
+
+generate-dockerfile:
+	@echo "Generating Dockerfile from template..."
+	@cp docker/build/node/Dockerfile.Template docker/build/node/Dockerfile
+	
+	# Generate build arguments section
+	@echo "# Build Arguments" > docker/build/node/args.tmp
+	@grep '^NEXT_PUBLIC_' env.example | sed 's/=.*//' | while read var; do \
+		echo "ARG $$var" >> docker/build/node/args.tmp; \
+	done
+	
+	# Generate build environment variables section
+	@echo "# Build Environment Variables" > docker/build/node/env_build.tmp
+	@grep '^NEXT_PUBLIC_' env.example | sed 's/=.*//' | while read var; do \
+		echo "ENV $$var=\$$$$var" >> docker/build/node/env_build.tmp; \
+	done
+	
+	# Generate runtime environment variables section
+	@echo "# Runtime Environment Variables" > docker/build/node/env_runtime.tmp
+	@grep '^NEXT_PUBLIC_' env.example | sed 's/=.*//' | while read var; do \
+		echo "ENV $$var=\$$$$var" >> docker/build/node/env_runtime.tmp; \
+	done
+	
+	# Replace placeholders in Dockerfile
+	@sed -i '/### ENV VAR ARGUMENTS/r docker/build/node/args.tmp' docker/build/node/Dockerfile
+	@sed -i '/###ENV VARS BUILD/r docker/build/node/env_build.tmp' docker/build/node/Dockerfile
+	@sed -i '/###ENV VARS RUNTIME/r docker/build/node/env_runtime.tmp' docker/build/node/Dockerfile
+	
+	# Cleanup temporary files
+	@rm docker/build/node/args.tmp docker/build/node/env_build.tmp docker/build/node/env_runtime.tmp
+	
+	@echo "Dockerfile generated successfully."
+
+lint:
+	@echo "Run Lint ..."
+	@if docker compose version >/dev/null 2>&1; then \
+		
+		docker compose run --rm yarn yarn lint; \
+	elif docker-compose version >/dev/null 2>&1; then \
+	
+		docker-compose run --rm yarn yarn lint; \
+	else \
+		echo "Neither 'docker compose' nor 'docker-compose' is available. Please install Docker or Docker Compose."; \
+		exit 1; \
+	fi

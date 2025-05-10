@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  nextjs:
+    build:
+      context: .
+      dockerfile: ./env/yarn/Dockerfile
+      args:
+        GITHUB_TOKEN: ${GITHUB_TOKEN:-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}
+    ports:
+      - "${EXTERNAL_PORT:-3000}:3000"
+    volumes:
+      - ./next-ui:/app
+      - ./ansible:/tmp/data/
+      - /app/node_modules
+      - /app/.next
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker
+      - /usr/local/bin/docker-compose:/usr/local/bin/docker-compose
+    environment:
+      - NODE_ENV=development
+      - GIT_DISCOVERY_ACROSS_FILESYSTEM=1
+    command: npm run dev

@@ -1,0 +1,254 @@
+- name: Erzeuge dynamisches Inventory-Dictionary
+  set_fact:
+    inventory_dict:
+      all:
+        children:
+          ubuntu:
+            hosts: {}
+            children:
+              dockerstack:
+                vars:
+                  target: "{{ TARGET }}"
+                  repo_user: "{{ REPO_USER }}"
+                  repo_owner: "{{ REPO_OWNER }}"
+                hosts:
+                  "{{ PROJECT_NAME }}-01":
+                    ansible_host: "{{ DEPLOY_SERVER_ADDRESS }}"
+                    ansible_user: "{{ ANSIBLE_SYSTEM_USER }}"
+                    repo_name: "{{ PROJECT_NAME }}--{{ PROJECT_NAME }}"
+                    docker_config:
+                      restart: "always"
+                      ports:
+                        - "{{ EXTERNAL_PORT }}:3000"
+                      networks:
+                        - "{{ PROJECT_NAME }}"
+
+- name: Konvertiere Inventory zu JSON-kompatiblem YAML
+  set_fact:
+    inventory_data: "{{ inventory_dict | to_nice_yaml(indent=2) | to_json }}"
+
+# Authentifiziere dich über curl (da uri nicht mit 204 umgehen kann)
+- name: Authentifiziere dich und speichere Cookie
+  ansible.builtin.shell: |
+    curl -c /tmp/semaphore-cookie -X POST \
+      -H 'Content-Type: application/json' \
+      -d '{{ CREDENTIALS }}' \
+      {{ LOGIN_URL }}
+  args:
+    executable: /bin/sh
+
+- name: Hole Token mit gespeicherten Cookies
+  ansible.builtin.command: >
+    curl -b /tmp/semaphore-cookie -X POST
+    -H 'Content-Type: application/json'
+    {{ TOKEN_URL }}
+  register: token_response
+
+- name: Setze token-Variable aus JSON-Antwort
+  ansible.builtin.set_fact:
+    token: "{{ (token_response.stdout | from_json).id }}"
+
+
+
+- name: Erstelle ein Inventory über die API
+  ansible.builtin.shell: |
+    curl -s -X POST {{ SEMAPHORE_HOST }}/api/project/{{ SEMAPHORE_PROJECT_ID }}/inventory \
+      -H "Authorization: Bearer {{ token }}" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "{{ PROJECT_NAME }}",
+        "type": "static-yaml",
+        "inventory": {{ inventory_data }},
+        "ssh_key_id": 21,
+        "project_id": {{ SEMAPHORE_PROJECT_ID }}
+      }'
+  args:
+    executable: /bin/sh
+  register: inventory_create_result
+
+- name: Hole Liste aller Inventories im Projekt (um ID zu finden)
+  ansible.builtin.shell: |
+    curl -s -X GET {{ SEMAPHORE_HOST }}/api/project/{{ SEMAPHORE_PROJECT_ID }}/inventory \
+      -H "Authorization: Bearer {{ token }}" \
+      -H "Content-Type: application/json"
+  register: inventory_list
+
+- name: Finde ID des Inventories mit passendem Namen
+  set_fact:
+    inventory_id: >-
+      {{
+        (
+          (inventory_list.stdout | from_json)
+          | selectattr("name", "equalto", PROJECT_NAME)
+          | map(attribute="id")
+          | list
+        )[0] | int
+      }}
+
+
+
+- name: Baue Template-Payload
+  set_fact:
+    template_payload: >-
+      {{
+        {
+          "type": "",
+          "name": PROJECT_NAME,
+          "description": PROJECT_NAME,
+          "playbook": "ubuntu/prod_deployment.yml",
+          "inventory_id": inventory_id | int,
+          "repository_id": 3,
+          "environment_id": 7,
+          "app": "ansible",
+          "arguments": "[]",
+          "project_id": SEMAPHORE_PROJECT_ID | int
+        } | to_json
+      }}
+
+- name: Erstelle Deployment-Template
+  ansible.builtin.shell: |
+    curl -s -X POST {{ SEMAPHORE_HOST }}/api/project/{{ SEMAPHORE_PROJECT_ID }}/templates -o /tmp/00_template_response.json \
+      -H "Authorization: Bearer {{ token }}" \
+      -H "Content-Type: application/json" \
+      -d '{{ template_payload }}'
+  args:
+    executable: /bin/sh
+  register: template_result
+
+- name: Debug - Zeige Inhalt der Antwort (JSON-Datei)
+  shell: cat /tmp/00_template_response.json
+  register: template_response_output
+  ignore_errors: yes
+
+- name: Parse Template Response wenn vorhanden
+  set_fact:
+    template_id: "{{ (template_response_output.stdout | from_json).id }}"
+
+
+- name: Debug - Zeige Template ID
+  debug:
+    msg: "Template ID: {{ template_id }}"
+
+
+
+
+
+# Integration erstellen
+- name: Baue JSON-Payload für Integration
+  set_fact:
+    integration_payload: >-
+      {{
+        {
+          "name": PROJECT_NAME,
+          "type": "webhook",
+          "template_id": template_id | int,
+          "project_id": SEMAPHORE_PROJECT_ID | int
+        } | to_json
+      }}
+
+- name: Sende POST-Anfrage zur Erstellung der Integration 
+  shell: |
+    curl -s -w "%{http_code}" -o /tmp/integration_response.json \
+      -X POST "{{ SEMAPHORE_HOST }}/api/project/{{ SEMAPHORE_PROJECT_ID }}/integrations" \
+      -H "Authorization: Bearer {{ token }}" \
+      -H "Content-Type: application/json" \
+      -d '{{ integration_payload }}'
+  args:
+    executable: /bin/sh
+  register: integration_result
+
+
+
+- name: Debug - Zeige Inhalt der Antwort (JSON-Datei)
+  shell: cat /tmp/integration_response.json
+  register: integration_response_output
+  ignore_errors: yes
+
+
+
+- name: Parse Integration Response wenn vorhanden
+  set_fact:
+    integration_id: "{{ (integration_response_output.stdout | from_json).id }}"
+
+
+
+
+# Matcher definieren
+- name: Generiere Random String
+  shell: tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w 45 | head -n 1
+  register: random_string
+
+- name: Speichere Random String
+  set_fact:
+    GENERATED_API_KEY: "{{ random_string.stdout }}"
+
+- name: Erzeuge Matcher
+  set_fact:
+    MATCHER: [
+      {
+        "match_key": "deploy_type",
+        "match_key_value": "{{ TARGET }}",
+      },
+      {
+        "match_key": "repository_owner",
+        "match_key_value": "{{ REPO_OWNER }}",
+      },
+      {
+        "match_key": "repository",
+        "match_key_value": "{{ PROJECT_NAME }}",
+      },
+      {
+        "match_key": "api_key",
+        "match_key_value": "{{ GENERATED_API_KEY }}",
+      }
+    ]
+
+- name: Füge Matcher hinzu
+  shell: |
+    curl -s -w "%{http_code}" -o /tmp/matcher_response.json \
+      -X POST "{{ SEMAPHORE_HOST }}/api/project/{{ SEMAPHORE_PROJECT_ID }}/integrations/{{ integration_id }}/matchers" \
+      -H "Authorization: Bearer {{ token }}" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "match_type": "body",
+        "body_data_type": "json",
+        "key": "{{ item.match_key }}",
+        "method": "equals",
+        "value": "{{ item.match_key_value }}",
+        "name": "{{ item.match_key }}-matcher",
+        "integration_id": {{ integration_id }}
+      }'
+  args:
+    executable: /bin/sh
+  loop: "{{ MATCHER }}"
+  register: matcher_result
+
+# Alias erzeugen
+- name: Füge Alias zur Integration hinzu
+  shell: |
+    curl -s -w "\n%{http_code}" -o /tmp/alias_response.json \
+      -X POST "{{ SEMAPHORE_HOST }}/api/project/{{ SEMAPHORE_PROJECT_ID }}/integrations/{{ integration_id }}/aliases" \
+      -H "Authorization: Bearer {{ token }}" \
+      -H "Accept: application/json, text/plain, */*"
+  args:
+    executable: /bin/sh
+  register: alias_result
+
+- name: Debug - Zeige Antwort-Inhalt
+  shell: cat /tmp/alias_response.json
+  register: response_output
+
+
+
+- name: Parse Integration URL ID wenn vorhanden
+  set_fact:
+    integration_url_id: "{{ (response_output.stdout | from_json).url | default('0') | split('/') | last }}"
+  
+
+
+
+# GitHub Secrets setzen
+- name: Setze GitHub-Variablen
+  shell: |
+    gh variable set "INTEGRATION_ALIAS" --body "{{ integration_url_id }}" --repo "{{ REPO_OWNER }}/{{ PROJECT_NAME }}" &&
+    gh secret set "ANSIBLE_API_KEY" --body "{{ GENERATED_API_KEY }}" --repo "{{ REPO_OWNER }}/{{ PROJECT_NAME }}"

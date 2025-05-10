@@ -1,0 +1,44 @@
+---
+- name: Project Setup für Ansible
+  hosts: localhost
+  gather_facts: no
+
+
+
+  vars:
+  
+    PROJECT_NAME: "aa-devops-setup-next-test" 
+    PROJECT_ROOT_DIR: "project"
+    CREDENTIALS: '{"auth": "admin", "password": "changeme"}'
+
+    SEMAPHORE_PROJECT_ID: 3
+    SEMAPHORE_HOST: "http://192.168.50.233:83"
+    LOGIN_URL: "{{ SEMAPHORE_HOST }}/api/auth/login"
+    TOKEN_URL: "{{ SEMAPHORE_HOST }}/api/user/tokens"
+    INTEGRATION_URL: "{{ SEMAPHORE_HOST }}/api/project/{{ SEMAPHORE_PROJECT_ID }}/integrations"
+
+    
+    ANSIBLE_SYSTEM_USER: "ubuntu"
+    REPO_USER: nkoske
+    REPO_OWNER: insecia
+    TARGET: prod
+    EXTERNAL_PORT: 60040
+    DEPLOY_SERVER_ADDRESS: 192.168.50.230
+  
+
+  tasks:
+    - name: Prepare Node Project
+      include_tasks: playbooks/Setup-Node-Project.yml
+
+    - name: Prepare Git Repository
+      include_tasks: playbooks/Setup-Git.yml
+
+    - name: Prepare Ansible
+      include_tasks: playbooks/Setup-Ansible.yml
+
+    - name: Clear Project Folder
+      include_tasks: playbooks/Clear-Project-Folder.yml
+
+
+
+    

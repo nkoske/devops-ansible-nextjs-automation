@@ -1,0 +1,100 @@
+- name: Projektverzeichnis erstellen
+  shell: |
+    rm -rf "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}"
+    mkdir -p "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}"
+
+- name: Installiere Next.js Projekt
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    npx create-next-app@latest . 
+    --ts --eslint --src-dir --app --import-alias "@/*" 
+    --no-tailwind --no-turbopack
+
+- name: Richte env.example ein
+  copy:
+    src: template-files/env.example
+    dest: "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}/env.example"
+    mode: '0644'
+    
+- name: Richte gitignore ein
+  copy:
+    src: template-files/gitignore
+    dest: "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}/.gitignore"
+    mode: '0644'
+
+- name: Richte docker-compose.yml ein
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    {
+      echo "services:";
+      echo "  yarn:";
+      echo "    build:";
+      echo "      context: ./docker/yarn";
+      echo "      dockerfile: Dockerfile";
+      echo "    command: \"yarn dev\"";
+      echo "    volumes:";
+      echo "      - .:/app";
+      echo "    labels:";
+      echo "      - \"traefik.enable=true\"";
+      echo "      - \"traefik.http.routers.{{ PROJECT_NAME }}-web.rule=Host(`{{ PROJECT_NAME }}.localhost`)\"";
+      echo "      - \"traefik.http.routers.{{ PROJECT_NAME }}-web.entrypoints=web\"";
+      echo "      - \"traefik.http.services.{{ PROJECT_NAME }}-web.loadbalancer.server.port=3000\"";
+      echo "    networks:";
+      echo "      - Developer_Network";
+      echo "networks:";
+      echo "  Developer_Network:";
+      echo "    external: true";
+    } > docker-compose.yml
+
+- name: Richte docker-compose.build.template.yml ein
+  copy:
+    src: template-files/docker-compose.build.template.yml
+    dest: "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}/docker-compose.build.template.yml"
+    mode: '0644'
+    
+- name: Schreibe statisches Makefile (Templating deaktiviert)
+  copy:
+    src: template-files/Makefile.raw
+    dest: "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}/Makefile"
+    mode: '0644'
+
+- name: Richte Workflow-Folder ein
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    mkdir -p .github/workflows &&
+    mkdir -p .github/workflow_templates
+
+- name: Richte .github/workflow_templates/automated_deploy.yml ein
+  copy:
+    src: template-files/workflow-template-automated_deploy.yml
+    dest: "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}/.github/workflow_templates/automated_deploy.yml"
+    mode: '0644'
+
+- name: Richte Docker-Folder ein
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    mkdir -p docker/yarn &&
+    mkdir -p docker/build/node
+ 
+- name: Richte Dockerfile Yarn ein
+  copy:
+    src: template-files/Dockerfile-YARN
+    dest: "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}/docker/yarn/Dockerfile"
+    mode: '0644'
+
+- name: Richte Dockerfile-Template Yarn ein
+  copy:
+    src: template-files/build-Dockerfile.Template
+    dest: "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}/docker/build/node/Dockerfile.Template"
+    mode: '0644'
+
+- name: make prepare
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    make prepare-ansible
+
+- name: make prepare deployment
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    make prepare-deployment
+    

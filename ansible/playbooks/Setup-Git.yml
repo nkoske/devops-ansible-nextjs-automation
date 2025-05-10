@@ -1,0 +1,70 @@
+- name: Initialize git repository
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    git init
+
+- name: git add All
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    git add -A
+
+- name: Configure git
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    git config --global user.email "{{ ANSIBLE_SYSTEM_USER }}@insecia.com" &&
+    git config --global user.name "{{ ANSIBLE_SYSTEM_USER }}"
+
+- name: git commit
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    git commit -m "initial commit"
+
+- name: create git repository
+  shell: >
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    gh repo create {{ REPO_OWNER }}/{{ PROJECT_NAME }} --private --source=. --remote=origin --push
+
+- name: list all env variables
+  shell: |
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    echo "Environment variables in env.example:" &&
+    cat env.example
+  register: env_output
+
+
+
+- name: Set GitHub secrets and variables from .env 
+  shell: |
+    #!/bin/sh
+    cd "{{ PROJECT_ROOT_DIR }}/{{ PROJECT_NAME }}" &&
+    echo "Checking for secrets in env.example..." &&
+    if [ ! -f env.example ]; then
+      echo "Error: env.example file not found!"
+      exit 1
+    fi
+    echo "Content of env.example:" &&
+    cat env.example | grep -E "secret|api_key|password" || echo "No secrets found in file" &&
+    echo "Processing variables..." &&
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+      # Skip empty lines or comments
+      [ -z "$key" ] || [[ "$key" =~ ^[[:space:]]*# ]] && continue
+      
+      # Clean up the key and value
+      key=$(echo "$key" | xargs)
+      value=$(echo "$value" | xargs)
+      
+      if [ -n "$key" ]; then
+        if echo "$key" | grep -qiE "PASSWORD|API_KEY|SECRET"; then
+          echo "Found secret variable: $key" &&
+          gh secret set "$key" --body "$value" --repo "{{ REPO_OWNER }}/{{ PROJECT_NAME }}" &&
+          echo "✓ Secret $key set successfully"
+        else
+          echo "Found regular variable: $key" &&
+          gh variable set "$key" --body "$value" --repo "{{ REPO_OWNER }}/{{ PROJECT_NAME }}" &&
+          echo "✓ Variable $key set successfully"
+        fi
+      fi
+    done < env.example
+  register: secrets_output
+
+

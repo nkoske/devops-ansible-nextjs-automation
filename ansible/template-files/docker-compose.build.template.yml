@@ -1,0 +1,6 @@
+services:
+  REPONAME:
+    image: "ghcr.io/${GITHUB_REPOSITORY_OWNER}/${REPO_NAME}--${SERVICE_NAME}:${DOCKER_TAG}"
+    build:
+      context: .
+      dockerfile: ./docker/build/node/Dockerfile

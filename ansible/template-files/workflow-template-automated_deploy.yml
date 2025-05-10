@@ -1,0 +1,231 @@
+name: BPD NEXTJS APP v1.1.0
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  debug-variables:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Debug Release Tag
+        run: |
+          echo "Release Tag: ${{ github.event.release.tag_name }}"
+          echo "Event Name: ${{ github.event_name }}"
+          echo "Ref Name: ${{ github.ref_name }}"
+
+  notify-start:
+    needs: debug-variables
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack Notification
+        env:
+          INTEGRATION_ALIAS: ${{ vars.INTEGRATION_ALIAS }}
+        run: |
+          REPO=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2)
+          DOCKER_TAG="${{ github.event.release.tag_name }}"
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"*Workflow started*\n*_Repository_*: ${REPO}:${DOCKER_TAG}\n*_Github Actor_*: ${GITHUB_ACTOR}\n*_Status_*: starting to build...\n<https://github.com/${GITHUB_REPOSITORY_OWNER}/${REPO}/actions/runs/${GITHUB_RUN_ID}|View Workflow Details>\"}" \
+            https://hooks.slack.com/services/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
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: notify-start
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v3
+
+      - name: Set Environment Variables
+        run: |
+          echo "DOCKER_REGISTRY=ghcr.io" >> $GITHUB_ENV
+          echo "REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2)" >> $GITHUB_ENV
+          echo "DOCKER_TAG=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          echo "LATEST_TAG=latest" >> $GITHUB_ENV
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        run: |
+          wget https://github.com/mikefarah/yq/releases/download/v4.33.3/yq_linux_amd64 -O /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+
+      - name: Extract Services from docker-compose.build.yml
+        id: extract-services
+        run: |
+          services=$(yq '.services | keys | join(" ")' docker-compose.build.yml)
+          echo "services=${services}" >> $GITHUB_ENV
+
+      - name: Build Docker Images for Services
+        run: |
+          # Validate and set version tag
+          VERSION_TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$VERSION_TAG" ]; then
+            echo "Error: Release tag is empty"
+            exit 1
+          fi
+          
+          for service in ${{ env.services }}; do
+            echo "Building image for service: $service"
+          
+            # Set image name and tag explicitly
+            IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/${{ env.REPO_NAME }}--${service}"
+            FULL_IMAGE_NAME="${IMAGE_NAME}:${VERSION_TAG}"
+            echo "Building image: ${FULL_IMAGE_NAME}"
+          
+            # Export environment variables
+            export SERVICE_NAME="$service"
+            export GITHUB_REPOSITORY_OWNER=${{ github.repository_owner }}
+            export DOCKER_TAG="$VERSION_TAG"
+            export REPO_NAME=${{ env.REPO_NAME }}
+            export NEXT_PUBLIC_VERSION="$VERSION_TAG"
+          
+            ### ENVIRONMENT VARIABLES Generation ###
+          
+          
+            # Build with explicit tag
+            DOCKER_BUILDKIT=1 docker compose -f docker-compose.build.yml build \
+              --build-arg VERSION_TAG="$VERSION_TAG" \
+              "$service"
+          
+            # List images for debugging
+            echo "Available images:"
+            docker images
+          
+            # Verify image exists using the full image name with tag
+            if docker image inspect "${FULL_IMAGE_NAME}" >/dev/null 2>&1; then
+              echo "Image ${FULL_IMAGE_NAME} found"
+              echo "Tagging as latest"
+              docker tag "${FULL_IMAGE_NAME}" "${IMAGE_NAME}:latest"
+            else
+              echo "Error: Built image ${FULL_IMAGE_NAME} not found"
+              exit 1
+            fi
+          done
+
+      - name: Push Docker Images to Registry
+        run: |
+          VERSION_TAG="${{ github.event.release.tag_name }}"
+          for service in ${{ env.services }}; do
+            IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/${{ env.REPO_NAME }}--${service}"
+          
+            echo "Pushing ${IMAGE_NAME}:${VERSION_TAG}"
+            docker push "${IMAGE_NAME}:${VERSION_TAG}"
+          
+            echo "Pushing ${IMAGE_NAME}:latest"
+            docker push "${IMAGE_NAME}:latest"
+          done
+
+  notify-build-success:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: success()
+    steps:
+      - name: Send Slack Notification
+        env:
+          INTEGRATION_ALIAS: ${{ vars.INTEGRATION_ALIAS }}
+        run: |
+          REPO=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2)
+          DOCKER_TAG="${{ github.event.release.tag_name }}"
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"*Workflow run*\n*_Repository_*: ${REPO}:${DOCKER_TAG}\n*_Github Actor_*: ${GITHUB_ACTOR}\n*_Status_*: build done, triggering deployment\n<https://github.com/${GITHUB_REPOSITORY_OWNER}/${REPO}/actions/runs/${GITHUB_RUN_ID}|View Workflow Details>\"}" \
+            https://hooks.slack.com/services/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
+
+  notify-build-failed:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: failure()
+    steps:
+      - name: Send Slack Notification
+        env:
+          INTEGRATION_ALIAS: ${{ vars.INTEGRATION_ALIAS }}
+        run: |
+          REPO=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2)
+          DOCKER_TAG="${{ github.event.release.tag_name }}"
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"*Workflow failed*\n*_Repository_*: ${REPO}:${DOCKER_TAG}\n*_Github Actor_*: ${GITHUB_ACTOR}\n*_Status_*: build failed\n<https://github.com/${GITHUB_REPOSITORY_OWNER}/${REPO}/actions/runs/${GITHUB_RUN_ID}|View Workflow Details>\"}" \
+            https://hooks.slack.com/services/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
+
+  trigger-deployment:
+    needs: notify-build-success
+    runs-on: ubuntu-latest
+    env:
+      ANSIBLE_API_KEY: ${{ secrets.ANSIBLE_API_KEY }}
+    steps:
+      - name: Create and print a dictionary
+        run: |
+          REPO=$(echo "$GITHUB_REPOSITORY" | cut -d'/' -f2)
+          VERSION="${{ github.ref_name }}"
+          ACTOR="$GITHUB_ACTOR"
+          WORKFLOW="$GITHUB_WORKFLOW"
+          REPOSITORY_OWNER="$GITHUB_REPOSITORY_OWNER"
+          
+          # Build the JSON dictionary and remove line breaks
+          DICT=$(jq -n \
+            --arg repository "$REPO" \
+            --arg version "$VERSION" \
+            --arg actor "$ACTOR" \
+            --arg workflow "$WORKFLOW" \
+            --arg repository_owner "$REPOSITORY_OWNER" \
+            --arg api_key "$ANSIBLE_API_KEY" \
+            '{repository: $repository, version: $version, actor: $actor, workflow: $workflow, repository_owner: $repository_owner, deploy_type: "prod", api_key: $api_key}' | tr -d '\n')
+          
+          # Write to GITHUB_ENV
+          echo "DEPLOYMENT_DATA=$DICT" >> $GITHUB_ENV
+
+      - name: Send Deployment Request
+        env:
+          INTEGRATION_ALIAS: ${{ vars.INTEGRATION_ALIAS }}
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "$DEPLOYMENT_DATA" \
+            https://deploy.inseciacloud.net/api/integrations/$INTEGRATION_ALIAS
+
+      - name: Debug Deployment Request
+        env:
+          INTEGRATION_ALIAS: ${{ vars.INTEGRATION_ALIAS }}
+        run: echo https://deploy.inseciacloud.net/api/integrations/$INTEGRATION_ALIAS
+
+      - name: Debug Deployment Data
+        run: echo $DEPLOYMENT_DATA
+
+  notify-trigger-success:
+    runs-on: ubuntu-latest
+    needs: trigger-deployment
+    if: success()
+    steps:
+      - name: Send Slack Notification
+        env:
+          INTEGRATION_ALIAS: ${{ vars.INTEGRATION_ALIAS }}
+        run: |
+          REPO=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2)
+          DOCKER_TAG="${{ github.event.release.tag_name }}"
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"*Workflow completed*\n*_Repository_*: ${REPO}:${DOCKER_TAG}\n*_Github Actor_*: ${GITHUB_ACTOR}\n*_Status_*: deployment triggered\n<https://github.com/${GITHUB_REPOSITORY_OWNER}/${REPO}/actions/runs/${GITHUB_RUN_ID}|View Workflow Details>\"}" \
+            https://hooks.slack.com/services/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
+
+  notify-trigger-failed:
+    runs-on: ubuntu-latest
+    needs: [trigger-deployment, notify-build-success]
+    if: needs.trigger-deployment.result == 'failure' # Nur wenn trigger-deployment fehlschlägt
+    steps:
+      - name: Send Slack Notification
+        env:
+          INTEGRATION_ALIAS: ${{ vars.INTEGRATION_ALIAS }}
+        run: |
+          REPO=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2)
+          DOCKER_TAG="${{ github.event.release.tag_name }}"
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"*Workflow failed*\n*_Repository_*: ${REPO}:${DOCKER_TAG}\n*_Github Actor_*: ${GITHUB_ACTOR}\n*_Status_*: triggering deployment failed\n<https://github.com/${GITHUB_REPOSITORY_OWNER}/${REPO}/actions/runs/${GITHUB_RUN_ID}|View Workflow Details>\"}" \
+            https://hooks.slack.com/services/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
